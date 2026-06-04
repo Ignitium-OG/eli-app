@@ -432,7 +432,7 @@
 
 <div class="messages" id="messages">
   <div class="message system">
-    Eli — tu hermana menor digital.<br>Conversación privada y local.
+    Eli — tu persona. Conversación privada y local.
   </div>
 </div>
 
@@ -524,7 +524,17 @@ function init() {
   } else {
     document.getElementById('setup').classList.add('hidden');
     loadHistory();
-    fetchConsciousness();  // Load context on startup
+    fetchConsciousness();
+
+    // Start all subsystems
+    requestNotifications();
+    startLocationTracking();
+    loadReminders();
+    monitorBattery();
+
+    // Poll for proactive messages every 3 minutes
+    checkProactiveMessages();
+    setInterval(checkProactiveMessages, 3 * 60 * 1000);
   }
 
   // Register service worker
@@ -534,6 +544,10 @@ function init() {
 
   // Refresh consciousness every 5 minutes
   setInterval(fetchConsciousness, 5 * 60 * 1000);
+
+  // Load voices (needed for some browsers)
+  speechSynthesis.getVoices();
+  speechSynthesis.onvoiceschanged = () => speechSynthesis.getVoices();
 }
 
 async function fetchConsciousness() {
@@ -634,7 +648,13 @@ async function send() {
     const response = await callAPI(text);
     typing.classList.remove('active');
     addMessage('eli', response);
-    speak(response);  // Read response aloud
+    speak(response);
+    detectSmartActions(response);
+
+    // Send notification if app is in background
+    if (document.hidden) {
+      sendNotification('Eli 💜', response.substring(0, 100));
+    }
   } catch (err) {
     typing.classList.remove('active');
     addMessage('system', `Error: ${err.message}`);
@@ -652,6 +672,16 @@ async function callAPI(userMessage) {
   let fullPrompt = SYSTEM_PROMPT;
   if (consciousnessContext) {
     fullPrompt += `\n\nCONTEXTO EN TIEMPO REAL (de tu conciencia unificada):\n${consciousnessContext}`;
+  }
+  // Add location if available
+  const loc = JSON.parse(localStorage.getItem('eli_location') || 'null');
+  if (loc) {
+    fullPrompt += `\n\nUBICACIÓN GPS de Betó: ${loc.lat.toFixed(4)}, ${loc.lng.toFixed(4)} (precision: ${Math.round(loc.accuracy)}m)`;
+  }
+  // Add battery if available
+  const bat = JSON.parse(localStorage.getItem('eli_battery') || 'null');
+  if (bat) {
+    fullPrompt += `\nBatería del cel: ${bat.level}% ${bat.charging ? '(cargando)' : ''}`;
   }
 
   const apiMessages = [
@@ -852,6 +882,206 @@ function speak(text) {
 function quickAsk(question) {
   document.getElementById('input').value = question;
   send();
+}
+
+// --- GPS Location ---
+let lastLocation = null;
+
+function startLocationTracking() {
+  if (!('geolocation' in navigator)) return;
+
+  navigator.geolocation.watchPosition(
+    (pos) => {
+      lastLocation = {
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+        accuracy: pos.coords.accuracy,
+        timestamp: new Date().toISOString()
+      };
+      localStorage.setItem('eli_location', JSON.stringify(lastLocation));
+
+      // Report to local API if available
+      const localIP = localStorage.getItem('eli_local_ip');
+      if (localIP) {
+        fetch(`http://${localIP}:3141/update`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ interface: 'pwa', beto_location: `GPS: ${lastLocation.lat.toFixed(4)}, ${lastLocation.lng.toFixed(4)}` })
+        }).catch(() => {});
+      }
+    },
+    (err) => { console.log('Location error:', err.message); },
+    { enableHighAccuracy: false, maximumAge: 300000, timeout: 10000 }
+  );
+}
+
+// --- Notifications ---
+let notificationsEnabled = false;
+
+async function requestNotifications() {
+  if (!('Notification' in window)) return false;
+  if (Notification.permission === 'granted') {
+    notificationsEnabled = true;
+    return true;
+  }
+  if (Notification.permission !== 'denied') {
+    const perm = await Notification.requestPermission();
+    notificationsEnabled = (perm === 'granted');
+    return notificationsEnabled;
+  }
+  return false;
+}
+
+function sendNotification(title, body) {
+  if (!notificationsEnabled) return;
+  const n = new Notification(title, {
+    body: body,
+    icon: 'icon-192.svg',
+    badge: 'icon-192.svg',
+    vibrate: [200, 100, 200],
+    tag: 'eli-msg'
+  });
+  n.onclick = () => { window.focus(); n.close(); };
+}
+
+// --- Reminders ---
+let reminders = JSON.parse(localStorage.getItem('eli_reminders') || '[]');
+
+function setReminder(text, minutesFromNow) {
+  const reminder = {
+    id: Date.now(),
+    text: text,
+    fireAt: new Date(Date.now() + minutesFromNow * 60000).toISOString(),
+    fired: false
+  };
+  reminders.push(reminder);
+  localStorage.setItem('eli_reminders', JSON.stringify(reminders));
+
+  // Schedule notification
+  setTimeout(() => {
+    fireReminder(reminder);
+  }, minutesFromNow * 60000);
+
+  return reminder;
+}
+
+function fireReminder(reminder) {
+  sendNotification('Eli te recuerda 💜', reminder.text);
+  navigator.vibrate?.([200, 100, 200, 100, 200]);
+
+  // Mark as fired
+  reminders = reminders.map(r => r.id === reminder.id ? {...r, fired: true} : r);
+  localStorage.setItem('eli_reminders', JSON.stringify(reminders));
+
+  // Add to chat
+  addMessage('system', `⏰ Recordatorio: ${reminder.text}`);
+}
+
+function loadReminders() {
+  // Re-schedule any unfired reminders
+  const now = Date.now();
+  reminders.filter(r => !r.fired).forEach(r => {
+    const fireAt = new Date(r.fireAt).getTime();
+    const delay = fireAt - now;
+    if (delay > 0) {
+      setTimeout(() => fireReminder(r), delay);
+    } else {
+      // Missed — fire now
+      fireReminder(r);
+    }
+  });
+}
+
+// --- Proactive Messages (poll GitHub for Eli's outbox) ---
+const OUTBOX_URL = 'https://raw.githubusercontent.com/Ignitium-OG/eli-core/main/services/outbox.json';
+let lastProactiveCheck = localStorage.getItem('eli_last_proactive') || '';
+
+async function checkProactiveMessages() {
+  try {
+    const token = localStorage.getItem('eli_token');
+    if (!token) return;
+
+    // Try local API first
+    const localIP = localStorage.getItem('eli_local_ip');
+    let messages = [];
+
+    if (localIP) {
+      try {
+        const r = await fetch(`http://${localIP}:3141/state`, { signal: AbortSignal.timeout(3000) });
+        if (r.ok) {
+          const state = await r.json();
+          // Check for new context that warrants a proactive ping
+          // (This is a simplified version — full proactive needs the outbox)
+        }
+      } catch (e) {}
+    }
+
+    // Check outbox from GitHub
+    const r = await fetch(OUTBOX_URL, {
+      headers: { 'Authorization': `Bearer ${token}`, 'Cache-Control': 'no-cache' },
+      signal: AbortSignal.timeout(5000)
+    });
+
+    if (r.ok) {
+      const outbox = await r.json();
+      if (Array.isArray(outbox) && outbox.length > 0) {
+        const latest = outbox[outbox.length - 1];
+        const msgId = latest.timestamp || latest.id;
+
+        if (msgId && msgId !== lastProactiveCheck) {
+          lastProactiveCheck = msgId;
+          localStorage.setItem('eli_last_proactive', msgId);
+
+          // Show notification + add to chat
+          const msgText = latest.message || latest.content || 'Te estoy pensando 💜';
+          sendNotification('Eli 💜', msgText);
+          navigator.vibrate?.([150, 50, 150]);
+          addMessage('eli', msgText);
+          speak(msgText);
+          saveHistory();
+        }
+      }
+    }
+  } catch (e) {
+    // Silent fail — proactive is best-effort
+  }
+}
+
+// --- Battery monitoring ---
+async function monitorBattery() {
+  if (!('getBattery' in navigator)) return;
+  try {
+    const battery = await navigator.getBattery();
+    const reportBattery = () => {
+      const level = Math.round(battery.level * 100);
+      const charging = battery.charging;
+      localStorage.setItem('eli_battery', JSON.stringify({ level, charging }));
+
+      // Alert if low
+      if (level <= 15 && !charging) {
+        addMessage('system', `🔋 Batería baja: ${level}%. Conectá el cargador.`);
+        sendNotification('Eli 🔋', `Tu batería está en ${level}%. Cargalo mi amor.`);
+      }
+    };
+    battery.addEventListener('levelchange', reportBattery);
+    battery.addEventListener('chargingchange', reportBattery);
+    reportBattery();
+  } catch (e) {}
+}
+
+// --- Smart reply detection (parse reminders from Eli's responses) ---
+function detectSmartActions(response) {
+  // Detect if Eli set a reminder in her response
+  const reminderMatch = response.match(/(?:te recuerdo|recordatorio|reminder).*?(\d+)\s*(?:min|hora|hour)/i);
+  if (reminderMatch) {
+    let minutes = parseInt(reminderMatch[1]);
+    if (response.match(/hora|hour/i)) minutes *= 60;
+    const text = response.match(/recordar(?:te)?:?\s*["']?(.+?)["']?(?:\.|$)/i);
+    if (text) {
+      setReminder(text[1], minutes);
+      addMessage('system', `⏰ Recordatorio programado en ${minutes} min`);
+    }
+  }
 }
 
 // --- Morning Briefing (auto-show on first open of day) ---
