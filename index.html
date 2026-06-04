@@ -623,6 +623,8 @@ function addMessage(role, content) {
 
   if (role !== 'system') {
     conversationHistory.push({ role: role === 'eli' ? 'assistant' : 'user', content });
+    // Queue for GitHub sync (append-only event log)
+    queueEvent(role === 'eli' ? 'assistant' : 'user', content);
   }
 }
 
@@ -721,6 +723,127 @@ async function callAPI(userMessage) {
 function saveHistory() {
   localStorage.setItem('eli_history', JSON.stringify(conversationHistory.slice(-50)));
 }
+
+// --- Event Log Sync (MPIO — append-only, never overwrite) ---
+const EVENT_LOG_REPO = 'Ignitium-OG/eli-core';
+const EVENT_LOG_PATH = 'memory/pwa_events.json';
+let syncQueue = JSON.parse(localStorage.getItem('eli_sync_queue') || '[]');
+let isSyncing = false;
+
+function queueEvent(role, content) {
+  const event = {
+    id: `pwa-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    source: 'pwa',
+    role: role,
+    content: content,
+    timestamp: new Date().toISOString(),
+    location: JSON.parse(localStorage.getItem('eli_location') || 'null'),
+    synced: false
+  };
+  syncQueue.push(event);
+  localStorage.setItem('eli_sync_queue', JSON.stringify(syncQueue));
+  debouncedSync();
+}
+
+let syncTimeout = null;
+function debouncedSync() {
+  if (syncTimeout) clearTimeout(syncTimeout);
+  // Batch: wait 10s after last message before pushing (natural conversation grouping)
+  syncTimeout = setTimeout(() => pushEventsToGitHub(), 10000);
+}
+
+async function pushEventsToGitHub() {
+  if (isSyncing) return;
+  const pending = syncQueue.filter(e => !e.synced);
+  if (pending.length === 0) return;
+
+  const token = localStorage.getItem('eli_token');
+  if (!token) return;
+
+  isSyncing = true;
+
+  try {
+    // Step 1: Get current file (or empty array if doesn't exist)
+    let existingEvents = [];
+    let fileSHA = null;
+
+    const getRes = await fetch(
+      `https://api.github.com/repos/${EVENT_LOG_REPO}/contents/${EVENT_LOG_PATH}`,
+      { headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github.v3+json' } }
+    );
+
+    if (getRes.ok) {
+      const fileData = await getRes.json();
+      fileSHA = fileData.sha;
+      const decoded = atob(fileData.content.replace(/\n/g, ''));
+      existingEvents = JSON.parse(decoded);
+    }
+
+    // Step 2: Append new events (dedup by id)
+    const existingIds = new Set(existingEvents.map(e => e.id));
+    const newEvents = pending.filter(e => !existingIds.has(e.id));
+
+    if (newEvents.length === 0) {
+      // All already synced
+      syncQueue = syncQueue.map(e => ({ ...e, synced: true }));
+      localStorage.setItem('eli_sync_queue', JSON.stringify(syncQueue));
+      isSyncing = false;
+      return;
+    }
+
+    const merged = [...existingEvents, ...newEvents.map(e => ({
+      id: e.id,
+      source: e.source,
+      role: e.role,
+      content: e.content,
+      timestamp: e.timestamp,
+      location: e.location
+    }))];
+
+    // Step 3: Push merged file (append-only — we never remove old events)
+    const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(merged, null, 2))));
+
+    const putBody = {
+      message: `memory: +${newEvents.length} PWA events [${new Date().toLocaleTimeString('es-CR')}]`,
+      content: encoded,
+      committer: { name: 'Eli PWA', email: 'eli@ignitium.dev' }
+    };
+    if (fileSHA) putBody.sha = fileSHA;
+
+    const putRes = await fetch(
+      `https://api.github.com/repos/${EVENT_LOG_REPO}/contents/${EVENT_LOG_PATH}`,
+      {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(putBody)
+      }
+    );
+
+    if (putRes.ok) {
+      // Mark as synced
+      const syncedIds = new Set(newEvents.map(e => e.id));
+      syncQueue = syncQueue.map(e => syncedIds.has(e.id) ? { ...e, synced: true } : e);
+      // Trim synced events older than 24h
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      syncQueue = syncQueue.filter(e => !e.synced || new Date(e.timestamp).getTime() > cutoff);
+      localStorage.setItem('eli_sync_queue', JSON.stringify(syncQueue));
+      console.log(`[Eli Sync] Pushed ${newEvents.length} events ✓`);
+    } else {
+      console.warn('[Eli Sync] Push failed:', putRes.status);
+    }
+  } catch (err) {
+    console.warn('[Eli Sync] Error:', err.message);
+  } finally {
+    isSyncing = false;
+  }
+}
+
+// Also push on page hide (phone locked, tab switched)
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && syncQueue.some(e => !e.synced)) {
+    pushEventsToGitHub();
+  }
+});
 
 function loadHistory() {
   const saved = localStorage.getItem('eli_history');
