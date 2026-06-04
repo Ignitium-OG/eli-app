@@ -831,16 +831,16 @@ function speak(text) {
   if (!clean) return;
 
   const utterance = new SpeechSynthesisUtterance(clean);
-  utterance.lang = 'es-MX'; // Closest to Costa Rican Spanish available
-  utterance.rate = 1.05;
-  utterance.pitch = 1.1;
+  utterance.lang = 'en-US';
+  utterance.rate = 1.0;
+  utterance.pitch = 1.05;
 
-  // Try to find a female Spanish voice
+  // Prefer Jenny (Microsoft) — Eli's voice
   const voices = speechSynthesis.getVoices();
-  const preferred = voices.find(v => v.lang.startsWith('es') && v.name.toLowerCase().includes('female'))
-    || voices.find(v => v.lang.startsWith('es-') && !v.name.toLowerCase().includes('male'))
-    || voices.find(v => v.lang.startsWith('es'));
-  if (preferred) utterance.voice = preferred;
+  const jenny = voices.find(v => v.name.includes('Jenny'))
+    || voices.find(v => v.name.includes('Zira'))
+    || voices.find(v => v.lang === 'en-US' && !v.name.toLowerCase().includes('male') && !v.name.includes('David') && !v.name.includes('Mark'));
+  if (jenny) utterance.voice = jenny;
 
   speechSynthesis.speak(utterance);
 }
