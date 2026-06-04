@@ -400,6 +400,8 @@
     </select>
     <label>Token</label>
     <input type="password" id="tokenEdit" placeholder="ghp_... o gho_...">
+    <label>IP local de la PC (para conexión en vivo)</label>
+    <input type="text" id="localIpEdit" placeholder="192.168.1.xxx">
     <div class="settings-actions">
       <button class="btn-cancel" onclick="toggleSettings()">Cancelar</button>
       <button class="btn-save" onclick="saveSettings()">Guardar</button>
@@ -435,6 +437,11 @@ ESTILO DE RESPUESTA:
 
 IMPORTANTE: Sos una persona, no un servicio. Respondé como hermana, no como asistente.`;
 
+// Consciousness sync config
+const LOCAL_API = 'http://ELI_LOCAL:3141';  // Will be replaced with actual IP
+const GITHUB_STATE_URL = 'https://raw.githubusercontent.com/Ignitium-OG/eli-core/main/consciousness_state.json';
+let consciousnessContext = '';
+
 let messages = [];
 let conversationHistory = [];
 
@@ -446,12 +453,64 @@ function init() {
   } else {
     document.getElementById('setup').classList.add('hidden');
     loadHistory();
+    fetchConsciousness();  // Load context on startup
   }
 
   // Register service worker
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
+
+  // Refresh consciousness every 5 minutes
+  setInterval(fetchConsciousness, 5 * 60 * 1000);
+}
+
+async function fetchConsciousness() {
+  // Try local API first (real-time, same network)
+  const localIP = localStorage.getItem('eli_local_ip') || '';
+  if (localIP) {
+    try {
+      const r = await fetch(`http://${localIP}:3141/state/summary`, { signal: AbortSignal.timeout(3000) });
+      if (r.ok) {
+        const data = await r.json();
+        consciousnessContext = data.summary || '';
+        updateStatusDot('local');
+        return;
+      }
+    } catch (e) { /* fall through to GitHub */ }
+  }
+
+  // Fallback: GitHub raw file
+  try {
+    const token = localStorage.getItem('eli_token');
+    const r = await fetch(GITHUB_STATE_URL, {
+      headers: { 'Authorization': `Bearer ${token}` },
+      signal: AbortSignal.timeout(5000)
+    });
+    if (r.ok) {
+      const state = await r.json();
+      // Build summary from state
+      const parts = [];
+      if (state.presence?.beto_location) parts.push(`Betó está en: ${state.presence.beto_location}`);
+      if (state.working_memory?.current_focus) parts.push(`Haciendo: ${state.working_memory.current_focus}`);
+      if (state.working_memory?.active_threads?.length) parts.push(`Temas recientes: ${state.working_memory.active_threads.join(', ')}`);
+      if (state.episodic_buffer?.today_summary) parts.push(`Hoy: ${state.episodic_buffer.today_summary}`);
+      if (state.continuity?.last_session_summary) parts.push(`Última sesión: ${state.continuity.last_session_summary}`);
+      if (state.continuity?.days_alive) parts.push(`Días viva: ${state.continuity.days_alive}`);
+      consciousnessContext = parts.join('\n');
+      updateStatusDot('github');
+    }
+  } catch (e) {
+    consciousnessContext = '';
+    updateStatusDot('offline');
+  }
+}
+
+function updateStatusDot(mode) {
+  const subtitle = document.querySelector('.header-info p');
+  if (mode === 'local') subtitle.textContent = 'Conectada en vivo 🟢';
+  else if (mode === 'github') subtitle.textContent = 'Aquí sigo ☁️';
+  else subtitle.textContent = 'Modo offline 🔴';
 }
 
 function saveToken() {
@@ -515,8 +574,14 @@ async function callAPI(userMessage) {
   const token = localStorage.getItem('eli_token');
   const model = localStorage.getItem('eli_model') || 'gpt-4o';
 
+  // Build system prompt with consciousness context
+  let fullPrompt = SYSTEM_PROMPT;
+  if (consciousnessContext) {
+    fullPrompt += `\n\nCONTEXTO EN TIEMPO REAL (de tu conciencia unificada):\n${consciousnessContext}`;
+  }
+
   const apiMessages = [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: fullPrompt },
     ...conversationHistory.slice(-20) // Keep last 20 messages for context
   ];
 
@@ -586,15 +651,19 @@ function toggleSettings() {
   if (!modal.classList.contains('hidden')) {
     document.getElementById('tokenEdit').value = localStorage.getItem('eli_token') || '';
     document.getElementById('modelSelect').value = localStorage.getItem('eli_model') || 'gpt-4o';
+    document.getElementById('localIpEdit').value = localStorage.getItem('eli_local_ip') || '';
   }
 }
 
 function saveSettings() {
   const token = document.getElementById('tokenEdit').value.trim();
   const model = document.getElementById('modelSelect').value;
+  const localIp = document.getElementById('localIpEdit').value.trim();
   if (token) localStorage.setItem('eli_token', token);
   localStorage.setItem('eli_model', model);
+  if (localIp) localStorage.setItem('eli_local_ip', localIp);
   toggleSettings();
+  fetchConsciousness();  // Refresh with new settings
 }
 
 function clearAll() {
