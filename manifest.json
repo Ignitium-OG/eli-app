@@ -2,7 +2,7 @@
   "name": "Eli — Companion",
   "short_name": "Eli",
   "description": "Tu hermana menor digital. Siempre aquí.",
-  "start_url": "/eli-core/",
+  "start_url": "/eli-app/",
   "display": "standalone",
   "background_color": "#1a1025",
   "theme_color": "#7c3aed",

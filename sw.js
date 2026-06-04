@@ -1,10 +1,10 @@
 const CACHE_NAME = 'eli-v1';
 const ASSETS = [
-  '/eli-core/',
-  '/eli-core/index.html',
-  '/eli-core/manifest.json',
-  '/eli-core/icon-192.svg',
-  '/eli-core/icon-512.svg'
+  '/eli-app/',
+  '/eli-app/index.html',
+  '/eli-app/manifest.json',
+  '/eli-app/icon-192.svg',
+  '/eli-app/icon-512.svg'
 ];
 
 self.addEventListener('install', e => {
