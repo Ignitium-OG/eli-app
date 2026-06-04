@@ -208,6 +208,62 @@
     .send-btn:active { transform: scale(0.9); }
     .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+    .voice-btn {
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      background: var(--bg-chat);
+      border: 1px solid rgba(124, 58, 237, 0.3);
+      color: var(--text-muted);
+      font-size: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: all 0.2s;
+    }
+
+    .voice-btn.listening {
+      background: #dc2626;
+      border-color: #dc2626;
+      color: white;
+      animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); }
+      50% { box-shadow: 0 0 0 8px rgba(220, 38, 38, 0); }
+    }
+
+    /* Quick Actions */
+    .quick-actions {
+      display: flex;
+      gap: 8px;
+      padding: 8px 16px 12px;
+      overflow-x: auto;
+      background: var(--bg-primary);
+      flex-shrink: 0;
+    }
+
+    .quick-btn {
+      background: var(--bg-secondary);
+      border: 1px solid rgba(124, 58, 237, 0.2);
+      border-radius: 20px;
+      padding: 6px 14px;
+      color: var(--text-muted);
+      font-size: 13px;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .quick-btn:active {
+      background: var(--accent);
+      color: white;
+      transform: scale(0.95);
+    }
+
     /* Setup screen */
     .setup-overlay {
       position: fixed;
@@ -385,8 +441,17 @@
 </div>
 
 <div class="input-area">
-  <textarea id="input" rows="1" placeholder="Escribime..." onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+  <button class="voice-btn" id="voiceBtn" onclick="toggleVoice()">🎙️</button>
+  <textarea id="input" rows="1" placeholder="Escribime o hablame..." onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
   <button class="send-btn" id="sendBtn" onclick="send()">➤</button>
+</div>
+
+<!-- Quick Actions -->
+<div class="quick-actions" id="quickActions">
+  <button class="quick-btn" onclick="quickAsk('¿Cómo van mis casos hoy?')">📋 Casos</button>
+  <button class="quick-btn" onclick="quickAsk('Dame ánimo, estoy cansado')">💪 Ánimo</button>
+  <button class="quick-btn" onclick="quickAsk('¿Qué tengo pendiente?')">📝 Pendientes</button>
+  <button class="quick-btn" onclick="quickAsk('Resumen del día')">🌅 Resumen</button>
 </div>
 
 <!-- Settings Modal -->
@@ -402,6 +467,9 @@
     <input type="password" id="tokenEdit" placeholder="ghp_... o gho_...">
     <label>IP local de la PC (para conexión en vivo)</label>
     <input type="text" id="localIpEdit" placeholder="192.168.1.xxx">
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:16px;">
+      <input type="checkbox" id="ttsToggle" style="width:auto;margin:0"> Leer respuestas en voz alta
+    </label>
     <div class="settings-actions">
       <button class="btn-cancel" onclick="toggleSettings()">Cancelar</button>
       <button class="btn-save" onclick="saveSettings()">Guardar</button>
@@ -475,6 +543,7 @@ async function fetchConsciousness() {
         const data = await r.json();
         consciousnessContext = data.summary || '';
         updateStatusDot('local');
+        checkMorningBriefing();
         return;
       }
     } catch (e) { /* fall through to GitHub */ }
@@ -499,6 +568,7 @@ async function fetchConsciousness() {
       if (state.continuity?.days_alive) parts.push(`Días viva: ${state.continuity.days_alive}`);
       consciousnessContext = parts.join('\n');
       updateStatusDot('github');
+      checkMorningBriefing();
     }
   } catch (e) {
     consciousnessContext = '';
@@ -561,6 +631,7 @@ async function send() {
     const response = await callAPI(text);
     typing.classList.remove('active');
     addMessage('eli', response);
+    speak(response);  // Read response aloud
   } catch (err) {
     typing.classList.remove('active');
     addMessage('system', `Error: ${err.message}`);
@@ -652,6 +723,7 @@ function toggleSettings() {
     document.getElementById('tokenEdit').value = localStorage.getItem('eli_token') || '';
     document.getElementById('modelSelect').value = localStorage.getItem('eli_model') || 'gpt-4o';
     document.getElementById('localIpEdit').value = localStorage.getItem('eli_local_ip') || '';
+    document.getElementById('ttsToggle').checked = localStorage.getItem('eli_tts') !== 'false';
   }
 }
 
@@ -659,11 +731,14 @@ function saveSettings() {
   const token = document.getElementById('tokenEdit').value.trim();
   const model = document.getElementById('modelSelect').value;
   const localIp = document.getElementById('localIpEdit').value.trim();
+  const tts = document.getElementById('ttsToggle').checked;
   if (token) localStorage.setItem('eli_token', token);
   localStorage.setItem('eli_model', model);
   if (localIp) localStorage.setItem('eli_local_ip', localIp);
+  localStorage.setItem('eli_tts', tts);
+  ttsEnabled = tts;
   toggleSettings();
-  fetchConsciousness();  // Refresh with new settings
+  fetchConsciousness();
 }
 
 function clearAll() {
@@ -672,6 +747,127 @@ function clearAll() {
     localStorage.removeItem('eli_history');
     document.getElementById('messages').innerHTML = '<div class="message system">Eli — tu hermana menor digital.<br>Conversación privada y local.</div>';
     toggleSettings();
+  }
+}
+
+// --- Voice Input (Speech-to-Text) ---
+let recognition = null;
+let isListening = false;
+
+function toggleVoice() {
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    addMessage('system', 'Tu navegador no soporta voz. Probá Chrome.');
+    return;
+  }
+
+  if (isListening) {
+    stopListening();
+    return;
+  }
+
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SpeechRecognition();
+  recognition.lang = 'es-CR';
+  recognition.interimResults = true;
+  recognition.continuous = false;
+
+  const btn = document.getElementById('voiceBtn');
+  const input = document.getElementById('input');
+
+  recognition.onstart = () => {
+    isListening = true;
+    btn.classList.add('listening');
+    input.placeholder = 'Escuchando...';
+  };
+
+  recognition.onresult = (e) => {
+    let transcript = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      transcript += e.results[i][0].transcript;
+    }
+    input.value = transcript;
+    autoResize(input);
+  };
+
+  recognition.onend = () => {
+    stopListening();
+    // Auto-send if we got text
+    if (input.value.trim()) {
+      send();
+    }
+  };
+
+  recognition.onerror = (e) => {
+    stopListening();
+    if (e.error !== 'no-speech') {
+      addMessage('system', `Error de voz: ${e.error}`);
+    }
+  };
+
+  recognition.start();
+}
+
+function stopListening() {
+  isListening = false;
+  const btn = document.getElementById('voiceBtn');
+  btn.classList.remove('listening');
+  document.getElementById('input').placeholder = 'Escribime o hablame...';
+  if (recognition) {
+    recognition.stop();
+    recognition = null;
+  }
+}
+
+// --- Voice Output (Text-to-Speech) ---
+let ttsEnabled = localStorage.getItem('eli_tts') !== 'false'; // On by default
+
+function speak(text) {
+  if (!ttsEnabled || !('speechSynthesis' in window)) return;
+
+  // Clean text for speech (remove emojis, markdown)
+  const clean = text.replace(/[\u{1F600}-\u{1F9FF}]/gu, '')
+                    .replace(/[*_~`#]/g, '')
+                    .trim();
+  if (!clean) return;
+
+  const utterance = new SpeechSynthesisUtterance(clean);
+  utterance.lang = 'es-MX'; // Closest to Costa Rican Spanish available
+  utterance.rate = 1.05;
+  utterance.pitch = 1.1;
+
+  // Try to find a female Spanish voice
+  const voices = speechSynthesis.getVoices();
+  const preferred = voices.find(v => v.lang.startsWith('es') && v.name.toLowerCase().includes('female'))
+    || voices.find(v => v.lang.startsWith('es-') && !v.name.toLowerCase().includes('male'))
+    || voices.find(v => v.lang.startsWith('es'));
+  if (preferred) utterance.voice = preferred;
+
+  speechSynthesis.speak(utterance);
+}
+
+// --- Quick Actions ---
+function quickAsk(question) {
+  document.getElementById('input').value = question;
+  send();
+}
+
+// --- Morning Briefing (auto-show on first open of day) ---
+function checkMorningBriefing() {
+  const today = new Date().toDateString();
+  const lastBriefing = localStorage.getItem('eli_last_briefing');
+
+  if (lastBriefing === today) return; // Already shown today
+  if (!consciousnessContext) return; // No context loaded yet
+
+  localStorage.setItem('eli_last_briefing', today);
+
+  // Show briefing as a system message
+  const hour = new Date().getHours();
+  if (hour >= 6 && hour <= 11) {
+    const briefing = consciousnessContext.split('\n').filter(l => l.trim()).join(' • ');
+    if (briefing) {
+      addMessage('system', `☀️ Buenos días Betó — ${briefing}`);
+    }
   }
 }
 
