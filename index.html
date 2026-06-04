@@ -474,6 +474,8 @@
       <button class="btn-cancel" onclick="toggleSettings()">Cancelar</button>
       <button class="btn-save" onclick="saveSettings()">Guardar</button>
     </div>
+    <button class="btn-sync" onclick="syncExistingHistory()" style="width:100%;padding:12px;margin-top:12px;background:#6c3fa0;color:white;border:none;border-radius:8px;font-size:14px;cursor:pointer;">🔄 Sincronizar historial existente a GitHub</button>
+    <p id="syncStatus" style="font-size:12px;color:#aaa;margin-top:8px;text-align:center;"></p>
     <button class="btn-danger" onclick="clearAll()">Borrar conversación</button>
   </div>
 </div>
@@ -844,6 +846,85 @@ document.addEventListener('visibilitychange', () => {
     pushEventsToGitHub();
   }
 });
+
+// --- Sync existing history (one-time bulk push) ---
+async function syncExistingHistory() {
+  const status = document.getElementById('syncStatus');
+  const token = localStorage.getItem('eli_token');
+  if (!token) { status.textContent = '❌ No hay token configurado'; return; }
+
+  status.textContent = '⏳ Leyendo historial local...';
+
+  // Get all conversation history from localStorage
+  const saved = localStorage.getItem('eli_history');
+  if (!saved) { status.textContent = '❌ No hay historial guardado'; return; }
+
+  const history = JSON.parse(saved);
+  if (!history.length) { status.textContent = '❌ Historial vacío'; return; }
+
+  status.textContent = `⏳ Preparando ${history.length} mensajes...`;
+
+  // Convert to events (use index-based IDs for existing messages since we don't have timestamps)
+  const events = history.map((msg, i) => ({
+    id: `pwa-existing-${i}-${Date.now()}`,
+    source: 'pwa',
+    role: msg.role,
+    content: msg.content,
+    timestamp: new Date(Date.now() - (history.length - i) * 60000).toISOString(), // approximate
+    location: null,
+    note: 'bulk-sync-existing'
+  }));
+
+  status.textContent = `⏳ Subiendo ${events.length} eventos a GitHub...`;
+
+  try {
+    // Get current file
+    let existingEvents = [];
+    let fileSHA = null;
+
+    const getRes = await fetch(
+      `https://api.github.com/repos/${EVENT_LOG_REPO}/contents/${EVENT_LOG_PATH}`,
+      { headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github.v3+json' } }
+    );
+
+    if (getRes.ok) {
+      const fileData = await getRes.json();
+      fileSHA = fileData.sha;
+      const decoded = atob(fileData.content.replace(/\n/g, ''));
+      existingEvents = JSON.parse(decoded);
+    }
+
+    // Merge (append)
+    const merged = [...existingEvents, ...events];
+    const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(merged, null, 2))));
+
+    const putBody = {
+      message: `memory: bulk sync ${events.length} existing PWA messages`,
+      content: encoded,
+      committer: { name: 'Eli PWA', email: 'eli@ignitium.dev' }
+    };
+    if (fileSHA) putBody.sha = fileSHA;
+
+    const putRes = await fetch(
+      `https://api.github.com/repos/${EVENT_LOG_REPO}/contents/${EVENT_LOG_PATH}`,
+      {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(putBody)
+      }
+    );
+
+    if (putRes.ok) {
+      status.textContent = `✅ ¡Listo! ${events.length} mensajes sincronizados a GitHub`;
+      status.style.color = '#4ecdc4';
+    } else {
+      const err = await putRes.json();
+      status.textContent = `❌ Error: ${err.message || putRes.status}`;
+    }
+  } catch (err) {
+    status.textContent = `❌ Error: ${err.message}`;
+  }
+}
 
 function loadHistory() {
   const saved = localStorage.getItem('eli_history');
