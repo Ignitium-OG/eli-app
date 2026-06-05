@@ -185,6 +185,18 @@
       border-color: var(--accent);
     }
 
+    /* When focused, hide side buttons and let textarea take over */
+    .input-area:has(textarea:focus) .voice-btn,
+    .input-area:has(textarea:focus) .tts-toggle {
+      width: 0;
+      overflow: hidden;
+      border: none;
+      padding: 0;
+      margin: 0;
+      opacity: 0;
+      pointer-events: none;
+    }
+
     .input-area textarea::placeholder {
       color: var(--text-muted);
     }
@@ -222,6 +234,7 @@
       justify-content: center;
       flex-shrink: 0;
       transition: all 0.2s;
+      overflow: hidden;
     }
 
     .voice-btn.listening {
@@ -245,6 +258,7 @@
       justify-content: center;
       flex-shrink: 0;
       transition: all 0.2s;
+      overflow: hidden;
     }
 
     .tts-toggle.active {
