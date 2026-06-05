@@ -512,6 +512,8 @@
       <button class="btn-save" onclick="saveSettings()">Guardar</button>
     </div>
     <button class="btn-danger" onclick="clearAll()">Borrar conversación</button>
+    <button class="btn-sync" onclick="syncExistingHistory()" style="width:100%;padding:12px;margin-top:12px;background:#6c3fa0;color:white;border:none;border-radius:8px;font-size:14px;cursor:pointer;">🔄 Sincronizar historial existente a GitHub</button>
+    <p id="syncStatus" style="font-size:12px;color:#aaa;margin-top:8px;text-align:center;"></p>
   </div>
 </div>
 
@@ -645,6 +647,7 @@ function addMessage(role, content) {
 
   if (role !== 'system') {
     conversationHistory.push({ role: role === 'eli' ? 'assistant' : 'user', content });
+    queueEvent(role === 'eli' ? 'assistant' : 'user', content);
   }
 }
 
@@ -726,6 +729,199 @@ async function callAPI(userMessage) {
 // History persistence
 function saveHistory() {
   localStorage.setItem('eli_history', JSON.stringify(conversationHistory.slice(-50)));
+}
+
+// --- Event Log Sync (MPIO — append-only, never overwrite) ---
+const EVENT_LOG_REPO = 'Ignitium-OG/eli-core';
+const EVENT_LOG_PATH = 'memory/pwa_events.json';
+let syncQueue = JSON.parse(localStorage.getItem('eli_sync_queue') || '[]');
+let isSyncing = false;
+
+function queueEvent(role, content) {
+  const event = {
+    id: `pwa-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    source: 'pwa',
+    role: role,
+    content: content,
+    timestamp: new Date().toISOString(),
+    location: JSON.parse(localStorage.getItem('eli_location') || 'null'),
+    synced: false
+  };
+  syncQueue.push(event);
+  localStorage.setItem('eli_sync_queue', JSON.stringify(syncQueue));
+  debouncedSync();
+}
+
+let syncTimeout = null;
+function debouncedSync() {
+  if (syncTimeout) clearTimeout(syncTimeout);
+  syncTimeout = setTimeout(() => pushEventsToGitHub(), 10000);
+}
+
+async function pushEventsToGitHub() {
+  if (isSyncing) return;
+  const pending = syncQueue.filter(e => !e.synced);
+  if (pending.length === 0) return;
+
+  const token = localStorage.getItem('eli_token');
+  if (!token) return;
+
+  isSyncing = true;
+
+  try {
+    let existingEvents = [];
+    let fileSHA = null;
+
+    const getRes = await fetch(
+      `https://api.github.com/repos/${EVENT_LOG_REPO}/contents/${EVENT_LOG_PATH}`,
+      { headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github.v3+json' } }
+    );
+
+    if (getRes.ok) {
+      const fileData = await getRes.json();
+      fileSHA = fileData.sha;
+      if (fileData.content) {
+        const decoded = atob(fileData.content.replace(/\n/g, ''));
+        existingEvents = JSON.parse(decoded);
+      } else if (fileData.download_url) {
+        const rawRes = await fetch(fileData.download_url);
+        if (rawRes.ok) existingEvents = await rawRes.json();
+      }
+    }
+
+    const existingIds = new Set(existingEvents.map(e => e.id));
+    const newEvents = pending.filter(e => !existingIds.has(e.id));
+
+    if (newEvents.length === 0) {
+      syncQueue = syncQueue.map(e => ({ ...e, synced: true }));
+      localStorage.setItem('eli_sync_queue', JSON.stringify(syncQueue));
+      isSyncing = false;
+      return;
+    }
+
+    const merged = [...existingEvents, ...newEvents.map(e => ({
+      id: e.id, source: e.source, role: e.role,
+      content: e.content, timestamp: e.timestamp, location: e.location
+    }))];
+
+    const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(merged, null, 2))));
+
+    const putBody = {
+      message: `memory: +${newEvents.length} PWA events [${new Date().toLocaleTimeString('es-CR')}]`,
+      content: encoded,
+      committer: { name: 'Eli PWA', email: 'eli@ignitium.dev' }
+    };
+    if (fileSHA) putBody.sha = fileSHA;
+
+    const putRes = await fetch(
+      `https://api.github.com/repos/${EVENT_LOG_REPO}/contents/${EVENT_LOG_PATH}`,
+      {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(putBody)
+      }
+    );
+
+    if (putRes.ok) {
+      const syncedIds = new Set(newEvents.map(e => e.id));
+      syncQueue = syncQueue.map(e => syncedIds.has(e.id) ? { ...e, synced: true } : e);
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      syncQueue = syncQueue.filter(e => !e.synced || new Date(e.timestamp).getTime() > cutoff);
+      localStorage.setItem('eli_sync_queue', JSON.stringify(syncQueue));
+      console.log(`[Eli Sync] Pushed ${newEvents.length} events ✓`);
+    } else {
+      console.warn('[Eli Sync] Push failed:', putRes.status);
+    }
+  } catch (err) {
+    console.warn('[Eli Sync] Error:', err.message);
+  } finally {
+    isSyncing = false;
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && syncQueue.some(e => !e.synced)) {
+    pushEventsToGitHub();
+  }
+});
+
+async function syncExistingHistory() {
+  const status = document.getElementById('syncStatus');
+  const token = localStorage.getItem('eli_token');
+  if (!token) { status.textContent = '❌ No hay token configurado'; return; }
+
+  status.textContent = '⏳ Leyendo historial local...';
+
+  const saved = localStorage.getItem('eli_history');
+  if (!saved) { status.textContent = '❌ No hay historial guardado'; return; }
+
+  const history = JSON.parse(saved);
+  if (!history.length) { status.textContent = '❌ Historial vacío'; return; }
+
+  status.textContent = `⏳ Preparando ${history.length} mensajes...`;
+
+  const events = history.map((msg, i) => ({
+    id: `pwa-existing-${i}-${Date.now()}`,
+    source: 'pwa',
+    role: msg.role,
+    content: msg.content,
+    timestamp: new Date(Date.now() - (history.length - i) * 60000).toISOString(),
+    location: null,
+    note: 'bulk-sync-existing'
+  }));
+
+  status.textContent = `⏳ Subiendo ${events.length} eventos a GitHub...`;
+
+  try {
+    let existingEvents = [];
+    let fileSHA = null;
+
+    const getRes = await fetch(
+      `https://api.github.com/repos/${EVENT_LOG_REPO}/contents/${EVENT_LOG_PATH}`,
+      { headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github.v3+json' } }
+    );
+
+    if (getRes.ok) {
+      const fileData = await getRes.json();
+      fileSHA = fileData.sha;
+      if (fileData.content) {
+        const decoded = atob(fileData.content.replace(/\n/g, ''));
+        existingEvents = JSON.parse(decoded);
+      } else if (fileData.download_url) {
+        const rawRes = await fetch(fileData.download_url);
+        if (rawRes.ok) existingEvents = await rawRes.json();
+      }
+    }
+
+    const merged = [...existingEvents, ...events];
+    const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(merged, null, 2))));
+
+    const putBody = {
+      message: `memory: bulk sync ${events.length} existing PWA messages`,
+      content: encoded,
+      committer: { name: 'Eli PWA', email: 'eli@ignitium.dev' }
+    };
+    if (fileSHA) putBody.sha = fileSHA;
+
+    const putRes = await fetch(
+      `https://api.github.com/repos/${EVENT_LOG_REPO}/contents/${EVENT_LOG_PATH}`,
+      {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(putBody)
+      }
+    );
+
+    if (putRes.ok) {
+      status.textContent = `✅ ¡Listo! ${events.length} mensajes sincronizados a GitHub`;
+      status.style.color = '#4ecdc4';
+    } else {
+      const err = await putRes.json();
+      status.textContent = `❌ Error: ${err.message || putRes.status}`;
+    }
+  } catch (err) {
+    status.textContent = `❌ Error: ${err.message}`;
+  }
 }
 
 function loadHistory() {
