@@ -231,6 +231,28 @@
       animation: pulse 1.5s infinite;
     }
 
+    .tts-toggle {
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      background: var(--bg-chat);
+      border: 1px solid rgba(124, 58, 237, 0.3);
+      color: var(--text-muted);
+      font-size: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: all 0.2s;
+    }
+
+    .tts-toggle.active {
+      background: rgba(124, 58, 237, 0.2);
+      border-color: rgba(124, 58, 237, 0.6);
+      color: var(--accent-warm);
+    }
+
     @keyframes pulse {
       0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); }
       50% { box-shadow: 0 0 0 8px rgba(220, 38, 38, 0); }
@@ -442,6 +464,7 @@
 
 <div class="input-area">
   <button class="voice-btn" id="voiceBtn" onclick="toggleVoice()">🎙️</button>
+  <button class="tts-toggle" id="ttsBtn" onclick="toggleTTS()" title="Voz on/off">🔊</button>
   <textarea id="input" rows="1" placeholder="Escribime o hablame..." onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
   <button class="send-btn" id="sendBtn" onclick="send()">➤</button>
 </div>
@@ -822,6 +845,28 @@ function stopListening() {
 
 // --- Voice Output (Text-to-Speech) ---
 let ttsEnabled = localStorage.getItem('eli_tts') !== 'false'; // On by default
+
+// Sync TTS toggle button state on load
+setTimeout(() => {
+  const btn = document.getElementById('ttsBtn');
+  if (btn) {
+    btn.classList.toggle('active', ttsEnabled);
+    btn.textContent = ttsEnabled ? '🔊' : '🔇';
+  }
+}, 100);
+
+function toggleTTS() {
+  ttsEnabled = !ttsEnabled;
+  localStorage.setItem('eli_tts', ttsEnabled);
+  const btn = document.getElementById('ttsBtn');
+  btn.classList.toggle('active', ttsEnabled);
+  btn.textContent = ttsEnabled ? '🔊' : '🔇';
+  // Sync with settings checkbox
+  const checkbox = document.getElementById('ttsToggle');
+  if (checkbox) checkbox.checked = ttsEnabled;
+  // Stop any current speech
+  if (!ttsEnabled) speechSynthesis.cancel();
+}
 
 // Detect dominant language: count Spanish-specific chars/words vs English
 function detectLang(text) {
