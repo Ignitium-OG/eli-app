@@ -678,6 +678,18 @@ async function send() {
   autoResize(input);
   addMessage('user', text);
 
+  // Check if it's a reminder request
+  const lower = text.toLowerCase();
+  if (lower.match(/(?:remind|recorda|recuérda)/)) {
+    const title = await addReminderFromChat(text);
+    if (title) {
+      addMessage('eli', `✅ Listo, te puse un recordatorio: "${title}". Te notifico cuando sea hora. 🔔`);
+      document.getElementById('sendBtn').disabled = false;
+      saveHistory();
+      return;
+    }
+  }
+
   const typing = document.getElementById('typing');
   typing.classList.add('active');
   document.getElementById('sendBtn').disabled = true;
@@ -1168,6 +1180,96 @@ function checkMorningBriefing() {
       addMessage('system', `☀️ Buenos días Betó — ${briefing}`);
     }
   }
+}
+
+// --- Reminders Sync (GitHub hybrid) ---
+const REMINDERS_REPO = 'Ignitium-OG/eli-core';
+const REMINDERS_PATH = 'data/reminders.json';
+
+async function loadReminders() {
+  const token = localStorage.getItem('eli_token');
+  if (!token) return [];
+  try {
+    const resp = await fetch(`https://api.github.com/repos/${REMINDERS_REPO}/contents/${REMINDERS_PATH}`, {
+      headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json' }
+    });
+    if (resp.status !== 200) return [];
+    const data = await resp.json();
+    return JSON.parse(atob(data.content.replace(/\n/g, '')));
+  } catch { return []; }
+}
+
+async function saveReminders(reminders) {
+  const token = localStorage.getItem('eli_token');
+  if (!token) return false;
+  try {
+    const getResp = await fetch(`https://api.github.com/repos/${REMINDERS_REPO}/contents/${REMINDERS_PATH}`, {
+      headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json' }
+    });
+    let sha = null;
+    if (getResp.status === 200) sha = (await getResp.json()).sha;
+
+    const content = btoa(unescape(encodeURIComponent(JSON.stringify(reminders, null, 2))));
+    const payload = { message: 'reminders: sync from pwa', content };
+    if (sha) payload.sha = sha;
+
+    const putResp = await fetch(`https://api.github.com/repos/${REMINDERS_REPO}/contents/${REMINDERS_PATH}`, {
+      method: 'PUT',
+      headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    return putResp.status === 200 || putResp.status === 201;
+  } catch { return false; }
+}
+
+function parseReminder(text) {
+  const lower = text.toLowerCase();
+  let match;
+
+  // "in X minutes"
+  match = lower.match(/(?:in|en)\s+(\d+)\s*(?:min|minuto|minute)/);
+  if (match) {
+    const mins = parseInt(match[1]);
+    const trigger = Date.now() + mins * 60000;
+    const title = extractReminderTitle(text) || `Recordatorio en ${mins} min`;
+    return { title, triggerTime: trigger };
+  }
+
+  // "in X hours"
+  match = lower.match(/(?:in|en)\s+(\d+)\s*(?:hour|hora)/);
+  if (match) {
+    const hrs = parseInt(match[1]);
+    const trigger = Date.now() + hrs * 3600000;
+    const title = extractReminderTitle(text) || `Recordatorio en ${hrs}h`;
+    return { title, triggerTime: trigger };
+  }
+
+  return null;
+}
+
+function extractReminderTitle(text) {
+  const match = text.match(/(?:remind me|recordame|recuérdame)\s+(?:to|que|about|para)\s+(.{5,80})/i);
+  return match ? match[1].trim() : null;
+}
+
+async function addReminderFromChat(text) {
+  const parsed = parseReminder(text);
+  if (!parsed) return false;
+
+  const reminder = {
+    id: crypto.randomUUID(),
+    title: parsed.title,
+    body: '',
+    triggerTime: parsed.triggerTime,
+    source: 'pwa',
+    createdAt: Date.now(),
+    fired: false
+  };
+
+  const existing = await loadReminders();
+  existing.push(reminder);
+  await saveReminders(existing);
+  return parsed.title;
 }
 
 init();
