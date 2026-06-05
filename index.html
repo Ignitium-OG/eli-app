@@ -777,8 +777,14 @@ async function pushEventsToGitHub() {
     if (getRes.ok) {
       const fileData = await getRes.json();
       fileSHA = fileData.sha;
-      const decoded = atob(fileData.content.replace(/\n/g, ''));
-      existingEvents = JSON.parse(decoded);
+      if (fileData.content) {
+        const decoded = atob(fileData.content.replace(/\n/g, ''));
+        existingEvents = JSON.parse(decoded);
+      } else if (fileData.download_url) {
+        // File >1MB: content not included, fetch via raw URL
+        const rawRes = await fetch(fileData.download_url);
+        if (rawRes.ok) existingEvents = await rawRes.json();
+      }
     }
 
     // Step 2: Append new events (dedup by id)
@@ -890,8 +896,14 @@ async function syncExistingHistory() {
     if (getRes.ok) {
       const fileData = await getRes.json();
       fileSHA = fileData.sha;
-      const decoded = atob(fileData.content.replace(/\n/g, ''));
-      existingEvents = JSON.parse(decoded);
+      if (fileData.content) {
+        const decoded = atob(fileData.content.replace(/\n/g, ''));
+        existingEvents = JSON.parse(decoded);
+      } else if (fileData.download_url) {
+        // File >1MB: content not included, fetch via raw URL
+        const rawRes = await fetch(fileData.download_url);
+        if (rawRes.ok) existingEvents = await rawRes.json();
+      }
     }
 
     // Merge (append)
